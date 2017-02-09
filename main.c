@@ -28,6 +28,7 @@
 #include <ctype.h>
 
 
+void DisplayTimeAndCount( int count );
 
 // DSPIC33EP256MU806 Configuration Bit Settings
 
@@ -53,7 +54,8 @@
 #pragma config WDTPRE = PR128           // Watchdog Timer Prescaler bit (1:128)
 #pragma config PLLKEN = ON              // PLL Lock Wait Enable bit (Clock switch to PLL source will wait until the PLL lock signal is valid.)
 #pragma config WINDIS = OFF             // Watchdog Timer Window Enable bit (Watchdog Timer in Non-Window mode)
-#pragma config FWDTEN = OFF             // Watchdog Timer Enable bit (Watchdog timer enabled/disabled by user software)
+//#pragma config FWDTEN = OFF             // Watchdog Timer Enable bit (Watchdog timer enabled/disabled by user software)
+#pragma config FWDTEN = ON             // Watchdog Timer Enable bit (Watchdog timer enabled/disabled by user software)
 
 // FPOR
 #pragma config FPWRT = PWR128           // Power-on Reset Timer Value Select bits (128ms)
@@ -94,6 +96,8 @@ typedef enum
   //  END_STATE
 } my_state_t;
 
+extern int global_timer;
+
 my_state_t state = INIT_STATE;
 
 /******************************************************************************/
@@ -104,11 +108,20 @@ mID message;
 mID messages[10];
 mID txMessage;
 
+
+
+
 uint16 PeopleCountIn  = 0;
 uint16 PeopleCountOut = 0;
 
 uint16 InOffset = 0;
 uint16 OutOffset = 0;
+
+int last_global_timer=0;
+
+int can_msgs_pending = 0;
+
+int FuncArea = 1;
 
 #define MAXUARTSIZE 30
 char uartcommand[MAXUARTSIZE];
@@ -142,8 +155,11 @@ int process_can_message(mID messageType)
    // copy the message based on first byte in data.
   if (messageType.data[0] < 0x6)
   {
-
     memcpy(&messages[messageType.data[0]],&messageType,sizeof(mID));
+  }
+  else
+  {
+      putstr("BAD CAN DATA\r\n");
   }
 
   return messageType.data[0]; // return the last message id
@@ -159,17 +175,18 @@ int process_can_message(mID messageType)
 // *** CheckForCanMessages ****************************************************************//
 // return 1 if a can message was received, 0 otherwise
 int CheckForCanMessages( void )
-{ // Determines whether or not a CAN message is waiting in the buffer
+{   
+   // Determines whether or not a CAN message is waiting in the buffer
+  // DANGER don't use while loop, just process one message at a time
   if (IsCanCommandAvailable())
   {
-    //  OUT1 = !OUT1; // toggle out 1 everytim we get CAN message TODO remove
-    can_messages_rcvd++;
-    //	GreenLedToggle(LED_ALWAYS);
-    retrieve_can_message(&message);
-    // put messages into array based on first byte
-    return process_can_message(message);
+    can_msgs_pending++;    
+    can_messages_rcvd++; // total count   
+    retrieve_can_message(&message);   
+    process_can_message(message);   // put messages into array based on first byte   
   }
-  return 0;
+    
+  return can_msgs_pending;
 }
 
 int RunLevel5MainFunc(void);
@@ -197,25 +214,78 @@ void FlushCanMessages( void )
 void ClearAllMessages( void )
 {
     int i; //,j;
-
+    
+   // DisplayTimeAndCount(-1);
+    // if (!UARTMODESW) { putstr("CLR\r\n"); }
+    can_msgs_pending = 0;
     for (i=0;i<10;i++)
     {
         memset(&messages[i] ,0xFF ,sizeof(mID));      
     }
 }
 
+void DisplayTimeAndCount( int count )
+{
+    char str[50];
+    int diff = global_timer - last_global_timer;
+     
+    sprintf(str,"%d %d\r\n",diff,count);
+    putstr(str); 
+    
+    last_global_timer = global_timer;
+}
+
+void  DisplayMessage( void )
+{
+    int i,idx;
+    char str[10];
+    unsigned char c;
+    
+    putstr("display msg:\r\n"); 
+    for (idx=1;idx<4;idx++)
+    {
+        for (i=0;i<8;i++)
+        {
+            putch('[');
+            c = messages[idx].data[i];
+            if (isalpha(c))
+            {
+                putch(c);
+            }
+            else
+            {
+              sprintf(str,"%x",c);
+              putstr(str);
+            }
+            putch(']');
+        }
+        putstr("\r\n");
+    }           
+}
 
 // if readstatus is true, then read the sensor status,
 // otherwise, read the door count.
 // aka,if door is closed, read sensor status, if door is open
 // then read door count.
-void ReadCount( boolean readstatus )
+void ParseCanMessages( void )
 {
 //    static boolean MsgFlop = false;
     int k;
+    int lastInCount=0;
+    int num_msgs = CheckForCanMessages();
     
+   
+     
  // Check to see if a status message arrived, but no status is available
-    if (CheckForCanMessages() == 1)
+    if (num_msgs == 0)
+    {
+        return;
+    }
+    
+    //DisplayTimeAndCount(num_msgs);
+    
+    
+    if (num_msgs == 1)
     {
        if ((messages[1].data[4] == 'S') &&
            (messages[1].data[5] == 0x30) &&
@@ -223,13 +293,18 @@ void ReadCount( boolean readstatus )
            (messages[1].data[7] == 0x00) ) // no status message waiting
        {
            // Sensor Status Query Response
-               SensorStatus = 0; // no status is available
+            if (!UARTMODESW) { putstr("Sensor Status Query Response\r\n"); } 
+            SensorStatus = 0; // no status is available
        }
        else if ((messages[1].data[4] == 'c') &&
                 (messages[1].data[5] == 0x10) &&
                 (messages[1].data[6] == 'B') )
        {           
             // this is a BROADCAST SCAN RESPONSE
+            if (!UARTMODESW) { 
+                putstr("BROADCAST SCAN RESPONSE\r\n");
+                //DisplayMessage();               
+            } 
        }
        else if  ((messages[1].data[4] == 'D') &&
                  (messages[1].data[5] == 0x30) &&
@@ -237,24 +312,34 @@ void ReadCount( boolean readstatus )
        {
          // Door State Count Message (who requested this?)
             // this is sent when DoorOpen and DoorClose are requested
+           //if (!UARTMODESW) { putstr("Door State Count Message\r\n"); } 
        }
        else if  ((messages[1].data[4] == 'C') &&
                  (messages[1].data[5] == 0x60) &&
                  (messages[1].data[6] == 'G') )
        {
-         // Count Data Query Response
+         // premature Count Data Query Response
+            //if (!UARTMODESW) { putstr("Count Data Query Response\r\n"); } 
+       }
+        else if  ((messages[1].data[4] == 'C') &&
+                 (messages[1].data[5] == 0x60) &&
+                 (messages[1].data[6] == 'R') )
+       {        
+            if (!UARTMODESW) { putstr("Count Reset Response\r\n"); } 
        }
        else
        {
-           k=23; // what message is this
-           k=4;
+           if (!UARTMODESW) { 
+               //putstr("Unknown Message\r\n");
+               //DisplayMessage();              
+           }            
        }
      }
 
 
     // check to see if status arrived, and grab the
     // Sensor Status if available
-    if (CheckForCanMessages() == 2)
+    else if (num_msgs == 2)
     {
            if ((messages[1].data[4] == 'S') &&
                (messages[1].data[5] == 0x30) &&
@@ -278,13 +363,30 @@ void ReadCount( boolean readstatus )
      }
 
      // Check for the people count
-    if (CheckForCanMessages() == 3)
+    else if (num_msgs == 3)
     {
+        //DisplayTimeAndCount(-33);
         if ((messages[1].data[4] == 'C') &&
             (messages[1].data[5] == 0x60) &&
             (messages[1].data[6] == 'G') )
         {
+           
+            
+            lastInCount = PeopleCountIn;
             PeopleCountIn =  ((uint16)messages[2].data[7])<<8 | (uint16)messages[2].data[6];
+           // if (PeopleCountIn > 10)
+           // {
+           //     putstr("bad count\r\n");
+           //     DisplayMessage();
+           // }
+            
+            //if (lastInCount != PeopleCountIn )
+           // {
+           //     if (!UARTMODESW) 
+           //     {                   
+           //       DisplayTimeAndCount(PeopleCountIn);                 
+           //     }
+           // }
             
             if (UARTMODESW)
             {
@@ -295,42 +397,57 @@ void ReadCount( boolean readstatus )
                 // jason doesn't want the count out to work any more for default mode
               PeopleCountOut = 0;
             }
-            if (PeopleCountIn != 0)
+            
+           
+        }
+        else if  ((messages[1].data[4] == 'C') &&
+                 (messages[1].data[5] == 0x60) &&
+                 (messages[1].data[6] == 'R') )
+        {        
+            if (!UARTMODESW) 
+            { 
+               // putstr("Count Reset Response\r\n");
+               // DisplayMessage();              
+            } 
+        }
+        else if ((messages[1].data[4] == 'C') &&
+                 (messages[1].data[5] == 0x60) &&
+                 (messages[1].data[6] == 0x21) &&
+                 (messages[1].data[7] == 'g')  &&
+                 (messages[2].data[5] == 'W')  &&
+                 (messages[2].data[6] == 'r')  &&
+                 (messages[2].data[7] == 'o')  &&
+                 (messages[3].data[4] == 'f')  &&
+                 (messages[3].data[5] == 'u')  &&
+                 (messages[3].data[6] == 'n')  &&
+                 (messages[3].data[7] == 'c')                 
+                )
+        {
+         if (!UARTMODESW) {   putstr("BAD FUNCTION AREA\r\n");  }
+            //FuncArea++;
+            if (FuncArea > 30) 
             {
-                k=3;
-                k=4;
-            }
-            if (PeopleCountOut != 0)
-            {
-                k=3;
-                k=4;
+                if (!UARTMODESW) {   putstr("FUNCTION AREA WRAPPING TO 0\r\n");  }
+                FuncArea=0;
             }
         }
         else
         {
+            if (!UARTMODESW) { 
+               // putstr("Unknown msg 2\r\n"); 
+               // DisplayMessage();                
+            } 
            k=4;
         }
         ClearAllMessages();
     }
-
-    if ( GetTimerInterrupts() > 50) // every 50 milliseconds read count
+    else // we have more than 3 CAN messages?
     {
-        SetTimerInterrupts(0);
-
-        if (readstatus)
-        {
-              // Update the Sensor Status, to decide if we are sabotaged or not
-            //  NOTE: The Sensor Status is only updated when the door is closed
-            // and was previously opened for at least 4 seconds
-            ClearAllMessages(); // this may be bad
-            SendIRMASensorStateRequest();
-        }
-        else
-        {
-            ClearAllMessages(); // this may be bad
-            SendIRMACounterStateRequest();           
-        }       
+        putstr("More than 3 msgs\r\n"); 
+       ClearAllMessages(); 
     }
+
+   
 }
 
 
@@ -377,7 +494,7 @@ void HandleUartCommands(void)
             //    putstr("\r\nRESET COUNT\r\n");            
             //} 
             else if (strncmp("STATUS", uartcommand, 6) == 0) {
-                ReadCount(TRUE);                 
+                ParseCanMessages();                 
                 if (SensorEnabled)
                 {
                     sprintf(uartcommand, "\r\nIN:%d\r\n", PeopleCountIn);
@@ -422,6 +539,58 @@ void HandleUartCommands(void)
 }
 
 
+
+void GetFunctionArea(unsigned long addr)
+{                         
+    // establish which function area the sensor is on.
+    int counter = 100;
+    char str[10];
+    while (counter--)
+    {
+        if ( !UARTMODESW) 
+        {
+            putstr("GET Function Area ");
+            sprintf(str, "%d\r\n", FuncArea);
+            putstr(str);
+        }
+        SendIRMACounterStateRequest2(addr,FuncArea);
+        SetWaitDelay(1000);    
+        while (GetWaitDelay()!=0);   
+        ParseCanMessages();  
+        SetWaitDelay(1000);    
+        while (GetWaitDelay()!=0);               
+    }    
+}
+   
+  
+void Delay( int timeMs )
+{
+    int t =  global_timer + timeMs;
+    while (global_timer != t);
+}
+
+
+// this function will properly handle the count
+// calculation when the internal counter wraps
+// at 65535
+uint16_t GetCountWithWrap( uint16_t last, uint16_t val )
+{
+   // char str[40];
+    long preval, newval;
+    long count;
+    preval = last;
+    newval = val;
+    count = newval - preval;
+    if (count < 0)
+    {
+        count += 65536;
+    }
+    //sprintf(str, "%li %li %d\r\n", preval,newval,(uint16_t)count);
+    //putstr(str);
+    return (uint16_t)count;
+}
+
+
 int16_t main(void)
 {
     int testcount=0;
@@ -440,9 +609,9 @@ int16_t main(void)
     InitApp();
 
     InitUART1();
-    
+   
     putstr("\r\n");
-    putstr("BT2I Version 4.0\r\n");   
+    putstr("BT2I Version 5.0\r\n");   
     if (UARTMODESW)
     {       
         putstr("Uart Mode\r\n");   
@@ -466,7 +635,7 @@ int16_t main(void)
         if (CheckForCanMessages())
         {
             putstr("Connection Established\r\n");
-            GetCANAddressFromBuffer();
+            GetCANAddressFromBuffer();           
             break; // break out of while loop, yee haw, we got a CAN address back
         }
         else
@@ -480,15 +649,32 @@ int16_t main(void)
             LED2 = (LED2)?FALSE:TRUE;
         }
     }
-
+    
+    if ( !UARTMODESW) putstr("Request Function Area\r\n");
+    
+    
+    //GetFunctionArea(sensorCanAddress);
+    //SendIRMAFunctionAreaStatusRequest();
+    SetWaitDelay(100);
+    while (GetWaitDelay()!=0)// wait 100 milliseconds for response
+    {       
+        if (CheckForCanMessages())
+        {
+          //if ( !UARTMODESW) putstr("Got FA response\r\n");           
+        }        
+    }
+   // DisplayMessage();
+   
+      
     SendIRMASetDoorsClose();    // Close doors to stop counting
-    SendIRMACountDataReset();
+    //SendIRMACountDataReset();
     SetWaitDelay(100);
     while (GetWaitDelay()!=0)
-        ReadCount(FALSE); // read door count
+        ParseCanMessages(); //(FALSE); // read door count
+    SendIRMACounterStateRequest(); 
     SetWaitDelay(100);
     while (GetWaitDelay()!=0)
-        ReadCount(FALSE); // read door count
+        ParseCanMessages(); //ReadCount(FALSE); // read door count
        // if sensor still has count, clear it out
     InOffset = PeopleCountIn;
     OutOffset = PeopleCountOut;
@@ -498,7 +684,21 @@ int16_t main(void)
 
     while (1)
     {
-        ReadCount(FALSE); // always update status        
+        ClrWdt();
+        
+        //DisplayTimeAndCount(PeopleCountIn);
+        ParseCanMessages();  
+        
+        if ( GetTimerInterrupts() > 50) // every 50 milliseconds read count
+        {
+            SetTimerInterrupts(0);
+            ClearAllMessages(); 
+           // putstr("CNT rsqt:\r\n");
+            SendIRMACounterStateRequest();  // make new count request
+            //DisplayTimeAndCount(PeopleCountIn);
+            //SendIRMASensorStateRequest();                
+        }
+        
         HandleUartCommands();  
         
         if ( UARTMODESW)
@@ -515,8 +715,14 @@ int16_t main(void)
                OUT1 = TRUE;
                OUT2 = TRUE;
                SendIRMASetDoorsClose();    // Close doors to stop counting
-               SendIRMACountDataReset();
+               SendIRMACounterStateRequest();
+               ClearAllMessages(); // throw away any current messages
+               SetTimerInterrupts(0); // dont read can messages for another 50 ms
+               SendIRMACounterStateRequest();
+                                      // else it might be corrupted
+               //SendIRMACountDataReset();
                state = WAIT_EXTERNAL_ENABLE; //WAIT_PROX1_PRESSED;
+               if (!UARTMODESW) { putstr("Waiting For Enable\r\n"); } 
     	       break;
 
             case WAIT_EXTERNAL_ENABLE:
@@ -524,12 +730,17 @@ int16_t main(void)
                 OUT2 = TRUE;
                 if ( ExternalEnablePressed())
                 {
-                    SendIRMACountDataReset();
+                    //SendIRMACountDataReset();
                        // Clear the people count
                     InOffset  = PeopleCountIn;
                     OutOffset = PeopleCountOut;
                     SendIRMASetDoorsOpen(); // turn on sensor
+                    SendIRMACounterStateRequest();
+                    ClearAllMessages(); // throw away any current messages
+                    SetTimerInterrupts(0); // don't read can messages for another 50 ms
+                    SendIRMACounterStateRequest();
                     state = RUNNING; //WAIT_PROX1_PRESSED;
+                    if (!UARTMODESW) { putstr("External Enable pressed\r\n"); } 
                 }
                 else
                 {
@@ -551,6 +762,9 @@ int16_t main(void)
                 }
                 else if (ExternalResetPressed() )
                 {
+                    if (!UARTMODESW) {
+                        putstr("reset pressed\r\n");                        
+                    } 
                     if (flashblink) { LED1 = 0;  LED2 = 1; }
                     else            { LED1 = 1;  LED2 = 0; }
                     InOffset = PeopleCountIn;
@@ -558,7 +772,9 @@ int16_t main(void)
                 }
                 else
                 {
-                     count = (PeopleCountIn-InOffset) - (PeopleCountOut-OutOffset);
+                    // wrap the result, because the counter will wrap at 65535
+                     count = GetCountWithWrap(InOffset,PeopleCountIn) - GetCountWithWrap(OutOffset,PeopleCountOut);
+                     //count = (PeopleCountIn-InOffset) - (PeopleCountOut-OutOffset);
                      switch (count)
                      {
                         case 0: // 0 people were counted

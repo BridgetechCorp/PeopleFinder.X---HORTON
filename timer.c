@@ -11,6 +11,7 @@ boolean slowblink=TRUE;
 int flashblinktime=0;
 int slowblinktime=0;
 int timer1_interrupts = 0;
+int global_timer=0;
 
 unsigned long wait_delay =0;
 
@@ -50,6 +51,7 @@ void SetTimerInterrupts( int val )
 
 void __attribute__((interrupt,no_auto_psv)) _T1Interrupt(void)
 {
+    global_timer++;
      if (wait_delay > 0) wait_delay--;
      slowblinktime++;
      if (slowblinktime >= 500)

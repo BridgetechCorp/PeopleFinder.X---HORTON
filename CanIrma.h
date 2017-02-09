@@ -9,6 +9,8 @@
 #define	CANIRMA_H
 
 extern void SendIRMACounterStateRequest( void );
+extern void SendIRMAFunctionAreaStatusRequest( void );
+extern void SendIRMACounterStateRequest2( unsigned long addr, int functionArea );
 extern void SendIRMACountDataReset( void );
 extern void SendIRMAGetCanAddress( void );
 extern void SendIRMASetDoorsOpen(void); // turn on the sensor

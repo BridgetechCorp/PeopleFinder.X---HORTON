@@ -714,7 +714,7 @@ void SendCanMessage( long id, char *data, int datalen )
     {
       // this is not good, we have been in this loop for 100000 cycles,
       // let's leave and turn off motor because the CAN bus must be stuck somehow
-       C1TR01CONbits.TXREQ0==0; // Not sure if this works to stop transmit.
+      C1TR01CONbits.TXREQ0==0; // Not sure if this works to stop transmit.
 
       AddErrorCode(CAN_TX_TIMEOUT);      
       return;
